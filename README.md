@@ -1,4 +1,3 @@
-# ANGSD
-This is a repo for class and homework
+# ANGDS final project!
 
-I will use this repository for the main project as well
+Welcome to my repo. Have fun :)
