@@ -15,6 +15,13 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE, warning=FALSE)
 ```
 
+```{r libraries}
+library(ggplot2)
+library(readr)
+library(DESeq2)
+library(magrittr)
+```
+
 # Downloading & documenting the data
 
 For this project, I will be analyzing the "BATLAS" dataset. This dataset has been fully uploaded to ENA with accession number `ERP022805`. Further information about the data can be found [here](https://www.ebi.ac.uk/ena/browser/view/ERP022805). To download the manifest of this study, we can use the following command:
@@ -422,14 +429,66 @@ This `BATLAS_counts_matrix.tsv` file contains raw gene counts, with genes in row
 
 ## RSeQC for RNA-seq QC on BAM files
 
-We can use the read_distribution.py from RSeQC on an aligned and sorted BAM file and
+We can use the `read_distribution.py` from RSeQC on an aligned and sorted BAM file to check what genomic features the reads are mapping to. This can help us understand the quality of our RNA-seq data and whether we have a good representation of different gene features (exons, introns, intergenic regions, etc.).
+
+First, lets get a `BED` file. Since we don't have write permisions to modify the enviroments, I created my own:
 
 ```{bash}
-conda activate rseqc
+conda create -y -n RSeQC \
+  python=3.10 \
+  rseqc \
+  samtools \
+  ucsc-gtftogenepred \
+  ucsc-genepredtobed \
+  -c conda-forge -c bioconda
+```
 
-read_distribution.py \
--i ERR458493.STAR.Aligned.sortedByCoord.out.bam \
--r /athena/angsd/scratch/las2017/angsd/referenceGenomes/sacCer3.sgd.bed > rseqc_data.txt
+```{bash}
+conda activate RSeQC
+
+gtfToGenePred gencode.v39.annotation.gtf gencode.v39.annotation.genePred
+genePredToBed gencode.v39.annotation.genePred gencode.v39.annotation.bed
+```
+
+```{bash}
+BAMS="/athena/angsd/scratch/sdb4002/Final_project/BAMs"
+BED="/athena/angsd/scratch/sdb4002/Final_project/gencode.v39.annotation.bed"
+OUT_DIR="/athena/angsd/scratch/sdb4002/Final_project/RSeQC_read_distribution"
+
+for bam in "$BAMS"/*.bam; do
+  sample=$(basename "$bam" .bam)
+  read_distribution.py -i "$bam" -r "$BED" > "$OUT_DIR/${sample}.read_distribution.txt"
+done
+```
+
+To get a summary table, we can parse the output files with the following `bash` command. This will extract the percentage of reads mapping to different genomic features for each sample and compile it into a single `tsv` file.
+
+```{bash}
+{
+  printf "sample\tgroup\tpercent\n" # header structure
+  for file in "$OUT_DIR"/*.read_distribution.txt; do
+    sample=$(basename "$file" .read_distribution.txt)
+    awk -v s="$sample" ' # only keep lines where the first column matches one of the desired genomic features
+      $1 ~ /^(CDS_Exons|5UTR_Exons|3UTR_Exons|Introns|TSS_up_10kb|TES_down_10kb)$/ { # extract the percentage, remove the % sign, and print the sample, group, and percent
+        gsub(/%/,"",$NF)
+        printf "%s\t%s\t%s\n", s, $1, $NF
+      }
+    ' "$file"
+  done
+} > "$OUT_DIR/read_distribution_summary.tsv"
+```
+
+To visualize the distribution:
+
+```{r, eval=TRUE}
+ggplot(read_tsv("read_distribution_summary.tsv"), aes(x = group, y = percent)) +
+  geom_boxplot(outlier.shape = NA, fill = "grey85", color = "black") +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.8, color = "steelblue") +
+  labs(
+    x = "Genomic feature",
+    y = "Percent of reads",
+    title = "RSeQC read distribution across samples") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 ## DESeq2 analysis of BAT vs WAT differential expression
@@ -437,10 +496,6 @@ read_distribution.py \
 Following the workflow from the practical, we first import the raw count matrix, generate the sample metadata table, and build a `DESeqDataSet`. At this stage, the objective is to prepare and normalize the count data appropriately before carrying out the actual statistical testing for differential expression.
 
 ```{r, eval=TRUE}
-library(DESeq2)
-library(ggplot2)
-library(magrittr)
-
 RawCounts <- read.table("BATLAS_counts_matrix.tsv", header = TRUE, sep = "\t", check.names = FALSE)
 SampleTable <- read.table("sample_table.tsv", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
 
