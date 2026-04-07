@@ -111,16 +111,22 @@ wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_39/GRCh38
 gunzip GRCh38.primary_assembly.genome.fa.gz
 ``` 
 
-To create the STAR index and align the samples, we can use the following script and `sbatch`. On note, GTEx uses STAR version `2.7.10a` while our `angsd` environment uses `2.7.11a`. Ideally, we would like to use the same version to maximize cross-dataset comparability; but I will be using this environment to keep things more reproducible.
+To create the STAR index and align the samples, we can use the following script and `sbatch`. GTEx uses STAR version `2.7.10a` while our `angsd` environment uses `2.7.11a`. Ideally, we would like to use the same version to maximize cross-dataset comparability; but I will be using this environment to keep things more reproducible.
 
-I will ask the slurm manager for 8 cpus per task so things more a little faster `{SLURM_CPUS_PER_TASK:-1}`. This will fall back to 1 if the variable is missing for any reason.
+I will ask the slurm manager for 8 cpus per task so things more a little faster `{SLURM_CPUS_PER_TASK}`.
+
+The file below will first check if the STAR index already exists in the specified `INDEX_DIR` and skip the index generation step if it does. This way, if we need to re-run the alignment for any reason, we won't waste time regenerating the index. Then, it will loop through all FASTQ files in the `FASTQ_DIR`, align them using STAR, and output sorted BAM files to the `BAM_DIR`. Finally, it will index each BAM file with `samtools`.
+
+For simplicity, I have hardcoded the paths in the script, but these can be easily modified to be passed as command-line arguments if needed.
+
+For STAR alignment, I used mostly the default parameters. I used `--sjdbOverhang 49` so splice junction sequences are optimized for the read length when creating the INDEX. When running the alignment, I specified `outSAMattributes All` to get all of the attributes, and `--outSAMtype BAM SortedByCoordinate` so the outputs would be sorted and `BAM` instead of `SAM`. Then, I also indexed each `BAM` right after running STAR using `samtools index`.
 
 `STAR_index_and_alignment.sh`:
 ```{bash}
 #!/usr/bin/env bash
 #SBATCH --job-name=star_hg38_v39
-#SBATCH --output=/athena/angsd/scratch/sdb4002/Final_project/STAR_RUN.out
-#SBATCH --error=/athena/angsd/scratch/sdb4002/Final_project/STAR_RUN.err
+#SBATCH --output=STAR_RUN.out
+#SBATCH --error=STAR_RUN.err
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -155,7 +161,7 @@ else
   echo "STAR index not found (or incomplete); generating in ${INDEX_DIR}..."
   STAR \
     --runMode genomeGenerate \
-    --runThreadN "${SLURM_CPUS_PER_TASK:-1}" \
+    --runThreadN "${SLURM_CPUS_PER_TASK}" \
     --genomeDir "${INDEX_DIR}" \
     --genomeFastaFiles "${GENOME_FA}" \
     --sjdbGTFfile "${GTF_FILE}" \
@@ -184,13 +190,9 @@ for fastq in "${FASTQS[@]}"; do
 done
 ```
 
-For this run, I used mostly the default STAR parameters. I used `--sjdbOverhang 49` so splice junction sequences are optimized for the read length when creating the INDEX
-
-When running the alignment, I specified `outSAMattributes All` to get all of the attributes, and `--outSAMtype BAM SortedByCoordinate` so the outputs would be sorted and `BAM` instead of `SAM`. Then, I also indexed each `BAM` right after running STAR.
-
 ## FastQC
 
-For FastQC and MultiQC, we can run on a `srun` on the terminal:
+For FastQC and MultiQC, I ran it on an interactive session on the terminal using 
 
 ```{bash}
 mkdir FASTQC_BAM && mkdir MULTIQC_BAM
@@ -417,6 +419,18 @@ $1 != "Geneid" { # for data rows, keep geneid and counts
 ```
 
 This `BATLAS_counts_matrix.tsv` file contains raw gene counts, with genes in rows and samples in columns, and can be used directly as input for tools such as `DESeq2` or `edgeR`.
+
+## RSeQC for RNA-seq QC on BAM files
+
+We can use the read_distribution.py from RSeQC on an aligned and sorted BAM file and
+
+```{bash}
+conda activate rseqc
+
+read_distribution.py \
+-i ERR458493.STAR.Aligned.sortedByCoord.out.bam \
+-r /athena/angsd/scratch/las2017/angsd/referenceGenomes/sacCer3.sgd.bed > rseqc_data.txt
+```
 
 ## DESeq2 analysis of BAT vs WAT differential expression
 
