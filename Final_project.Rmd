@@ -15,7 +15,7 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE, warning=FALSE)
 ```
 
-```{r libraries}
+```{r libraries, eval=TRUE}
 library(ggplot2)
 library(DESeq2)
 library(magrittr)
