@@ -656,18 +656,29 @@ library(biomaRt)
 Vulcano <- as.data.frame(res_bat_vs_wat)
 Vulcano$ensembl_gene_id <- sub("\\..*$", "", rownames(Vulcano)) # remove version tail
 
-mart <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
-
-gene_map <- getBM(
-  attributes = c("ensembl_gene_id", "hgnc_symbol"),
-  filters = "ensembl_gene_id",
-  values = unique(Vulcano$ensembl_gene_id),
-  mart = mart)
-
-gene_map <- gene_map[gene_map$hgnc_symbol != "", ]
+gene_map <- tryCatch({
+  mart <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  out <- getBM(
+    attributes = c("ensembl_gene_id", "hgnc_symbol"),
+    filters = "ensembl_gene_id",
+    values = unique(Vulcano$ensembl_gene_id),
+    mart = mart)
+  out[out$hgnc_symbol != "", , drop = FALSE]
+}, error = function(e) {
+  message("biomaRt unavailable; using Ensembl IDs as plot labels. ", conditionMessage(e))
+  data.frame(
+    ensembl_gene_id = character(),
+    hgnc_symbol = character(),
+    stringsAsFactors = FALSE
+  )
+})
 
 Vulcano <- merge(Vulcano, gene_map, by = "ensembl_gene_id", all.x = TRUE, sort = FALSE)
-Vulcano$label <- ifelse(is.na(Vulcano$hgnc_symbol), rownames(as.data.frame(res_bat_vs_wat)), Vulcano$hgnc_symbol)
+Vulcano$label <- ifelse(
+  is.na(Vulcano$hgnc_symbol) | Vulcano$hgnc_symbol == "",
+  rownames(as.data.frame(res_bat_vs_wat)),
+  Vulcano$hgnc_symbol
+)
 Vulcano <- Vulcano[match(sub("\\..*$", "", rownames(as.data.frame(res_bat_vs_wat))), Vulcano$ensembl_gene_id), ]
 Vulcano$Gene <- rownames(as.data.frame(res_bat_vs_wat))
 Vulcano <- Vulcano[, !(names(Vulcano) %in% c("Gene", "hgnc_symbol", "ensembl_gene_id"))]
@@ -865,22 +876,36 @@ data <- data %>%
   mutate(Gene = sub("\\..*$", "", Gene))  # remove .version in ensembl id
 
 bat_tpm <- read_tsv("average_TPM_across_samples_cohort_2.tsv") # quantificatoin using RSEM, same process GTEx used
+bat_tpm_value_col <- intersect(c("BAT_TPM", "mean_TPM"), names(bat_tpm)) # I have to versions...
+
 bat_tpm <- bat_tpm %>%
-  mutate(Gene = sub("\\..*$", "", gene_id)) %>%  # remove .version in ensembl id
-  dplyr::select(Gene, "Adipose_Brown" = BAT_TPM)
+  mutate(
+    Gene = sub("\\..*$", "", gene_id),  # remove .version in ensembl id
+    Adipose_Brown = .data[[bat_tpm_value_col]]
+  ) %>%
+  dplyr::select(Gene, Adipose_Brown)
 
 # annotate gene types
-mart <- useEnsembl("ensembl", dataset="hsapiens_gene_ensembl")
+gene_types <- tryCatch({
+  mart <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+  getBM(
+    attributes = c("ensembl_gene_id", "gene_biotype"),
+    filters = "ensembl_gene_id",
+    values = unique(data$Gene),
+    mart = mart
+  )
+}, error = function(e) {
+  message("biomaRt unavailable; proceeding without gene_biotype filtering. ", conditionMessage(e))
+  NULL
+})
 
-gene_types <- getBM(
-  attributes = c("ensembl_gene_id", "gene_biotype"),
-  filters = "ensembl_gene_id",
-  values = unique(data$Gene),
-  mart = mart)
-
-data_pc <- data %>% # Subset so it only contains protein coding genes! I only want those
-  inner_join(gene_types, by = c("Gene"="ensembl_gene_id")) %>%
-  filter(gene_biotype == "protein_coding")
+data_pc <- if (!is.null(gene_types) && nrow(gene_types) > 0) {
+  data %>%
+    inner_join(gene_types, by = c("Gene" = "ensembl_gene_id")) %>%
+    filter(gene_biotype == "protein_coding")
+} else {
+  data
+}
 
 merged_tpm <- data_pc %>%
   left_join(bat_tpm, by = "Gene", relationship = "many-to-many") # merge the GTEx TPM with the BAT TPM using the gene id as key. This is a many-to-many relationship because some genes have multiple transcripts, and thus multiple rows in the GTEx data, but only one row in the BAT TPM data (since RSEM quantifies at the gene level by summing across transcripts)
@@ -894,7 +919,7 @@ merged_tpm$Adipose_Brown <- as.numeric(merged_tpm$Adipose_Brown) # this gives us
 tissue_cols <- setdiff(colnames(merged_tpm), c("Gene", "Gene.name"))
 
 tpm_mat <- merged_tpm %>%
-  dplyr::select(-gene_biotype, -Gene, -Gene.name) %>%  # remove gene_biotype + keep only tissues
+  dplyr::select(-any_of(c("gene_biotype", "Gene", "Gene.name"))) %>%  # remove annotation cols if present; keep only tissues
   mutate(across(everything(), as.numeric)) %>%  # make columns numeric
   as.matrix() # turn into a matrix
 
@@ -996,9 +1021,6 @@ bg_umap <- uwot::umap(
   ret_model = TRUE,
   verbose = TRUE,
   seed = 1999)
-
-# uwot::save_uwot(bg_umap, "bg_umap_model_5")
-bg_umap <- uwot::load_uwot("bg_umap_model_5")
 
 # With ret_model=TRUE, bg_umap is a LIST; coords are in $embedding
 stopifnot(is.list(bg_umap), !is.null(bg_umap$embedding))
@@ -1245,8 +1267,6 @@ p <- ggplot() +
     x = "UMAP1", y = "UMAP2")
 
 print(p)
-
-message("Signature genes used for background UMAP: ", nrow(bg_df))
 ```
 
 ```{r, eval=TRUE}
