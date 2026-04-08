@@ -17,9 +17,16 @@ knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE, warning=FALSE)
 
 ```{r libraries}
 library(ggplot2)
-library(readr)
 library(DESeq2)
 library(magrittr)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggrepel)
+library(tibble)
+library(biomaRt)
+library(readr)
+library(purrr)
 ```
 
 # Downloading & documenting the data
@@ -464,14 +471,19 @@ done
 To get a summary table, we can parse the output files with the following `bash` command. This will extract the percentage of reads mapping to different genomic features for each sample and compile it into a single `tsv` file.
 
 ```{bash}
+OUT_DIR="/athena/angsd/scratch/sdb4002/Final_project/RSeQC_read_distribution"
+
 {
-  printf "sample\tgroup\tpercent\n" # header structure
+  printf "sample\tgroup\tpercent\n"
   for file in "$OUT_DIR"/*.read_distribution.txt; do
     sample=$(basename "$file" .read_distribution.txt)
-    awk -v s="$sample" ' # only keep lines where the first column matches one of the desired genomic features
-      $1 ~ /^(CDS_Exons|5UTR_Exons|3UTR_Exons|Introns|TSS_up_10kb|TES_down_10kb)$/ { # extract the percentage, remove the % sign, and print the sample, group, and percent
-        gsub(/%/,"",$NF)
-        printf "%s\t%s\t%s\n", s, $1, $NF
+    awk -v s="$sample" '
+      $1 == "Total" && $2 == "Assigned" && $3 == "Tags" { # store the total number of assigned reads for this sample
+        assigned = $4 # the number of reads assigned to any feature
+      }
+      $1 ~ /^(CDS_Exons|5'\''UTR_Exons|3'\''UTR_Exons|Introns|TSS_up_10kb|TES_down_10kb)$/ && assigned > 0 {
+        percent = ($3 / assigned) * 100 # calculate percentage of reads mapping to this feature
+        printf "%s\t%s\t%.2f\n", s, $1, percent
       }
     ' "$file"
   done
@@ -618,6 +630,8 @@ ggplot(pca_data, aes(PC1, PC2, color = condition, label = name)) +
   theme_bw()
 ```
 
+PC1 shows a modest 35% variance, but it is enough to separate most of the BAT samples from the WAT samples, except for `E387_7_brown_fat` that clusters with WAT instead. PC2 captures around 19% of the variance and shows some separation within the BAT samples, but does not clearly separate BAT from WAT.
+
 This shows that `E387_7_brown_fat` is relatively similar to the `WAT` samples. Since this are human samples taken surgically from patients and Brown adipose tissue is difficult to identify in adult humans, perhaps this sample has a higher proportion of white adipose tissue in it.
 
 Finally, we can run the standard DESeq2 differential expression workflow comparing BAT against WAT and extract the results table.
@@ -634,13 +648,13 @@ head(as.data.frame(res_bat_vs_wat))
 summary(res_bat_vs_wat)
 ```
 
-Lets visualize the results! First, for readability, I am going to change `EnsemblID` to `Symbols`
+Lets visualize the results! For readability, I will use `biomaRt` to retrieve HGNC symbols and use those as row names in the `Vulcano` table when available.
 
-```{r, eval=TRUE}
+```{r BioMart, eval=TRUE}
 library(biomaRt)
 
 Vulcano <- as.data.frame(res_bat_vs_wat)
-Vulcano$ensembl_gene_id <- sub("\\..*$", "", rownames(Vulcano))
+Vulcano$ensembl_gene_id <- sub("\\..*$", "", rownames(Vulcano)) # remove version tail
 
 mart <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
 
@@ -651,13 +665,19 @@ gene_map <- getBM(
   mart = mart)
 
 gene_map <- gene_map[gene_map$hgnc_symbol != "", ]
-gene_map <- gene_map[!duplicated(gene_map$ensembl_gene_id), ]
 
 Vulcano <- merge(Vulcano, gene_map, by = "ensembl_gene_id", all.x = TRUE, sort = FALSE)
-Vulcano$label <- ifelse(is.na(Vulcano$hgnc_symbol) | Vulcano$hgnc_symbol == "", rownames(as.data.frame(res_bat_vs_wat)), Vulcano$hgnc_symbol)
+Vulcano$label <- ifelse(is.na(Vulcano$hgnc_symbol), rownames(as.data.frame(res_bat_vs_wat)), Vulcano$hgnc_symbol)
 Vulcano <- Vulcano[match(sub("\\..*$", "", rownames(as.data.frame(res_bat_vs_wat))), Vulcano$ensembl_gene_id), ]
 Vulcano$Gene <- rownames(as.data.frame(res_bat_vs_wat))
+Vulcano <- Vulcano[, !(names(Vulcano) %in% c("Gene", "hgnc_symbol", "ensembl_gene_id"))]
 ```
+
+```{r, eval=TRUE}
+knitr::kable(head(Vulcano, 15), caption = "Top 15 genes in the Vulcano table after BioMart annotation")
+```
+
+#### Volcano plot of BAT vs WAT differential expression results
 
 ```{r, eval=TRUE ,fig.width=10, fig.height=8}
 library(EnhancedVolcano)
@@ -673,6 +693,560 @@ EnhancedVolcano(
   subtitle = "DESeq2 results",
   caption = "Adjusted P = BH FDR",
   col = c("grey80", "steelblue3", "goldenrod2", "coral"))
+```
+This analysis shows that there are many genes differentially expressed between BAT and WAT, with some of the most significant ones being `UCP1`, `CIDEA`, and `PPARGC1A`, which are known markers of brown adipose tissue. This suggests that our analysis is capturing biologically meaningful differences between the two tissue types, and validates the BATLAS dataset as a useful resource for studying the molecular characteristics of brown and white adipose tissue in humans.
+
+Next, I will take the BAT samples (except for the `E387_7_brown_fat` sample that clusters with WAT) and merge them with the GTEx data to see how they compare globally.
+
+## GTEX merging of BAT samples
+
+### Generating BAT TPM values with RSEM and STAR
+
+Working on a different cluster!
+
+First, we need to download the GTEx annotation and FASTA files. I will use the same GENCODE v39 annotation that GTEx used for their v10 release to maximize comparability.
+
+GTEx TPM values for other non-BAT tissues can be found [here](https://www.gtexportal.org/home/downloads/adult-gtex/metadata)
+
+```{bash}
+# same annotation as the one GTEX where using for v10
+wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_39/gencode.v39.annotation.gtf.gz
+gunzip -c gencode.v39.annotation.gtf.gz > gencode.v39.annotation.gtf
+
+wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_39/GRCh38.primary_assembly.genome.fa.gz
+gunzip GRCh38.primary_assembly.genome.fa.gz
+
+# IMPORTANT! The FASTA file I downloaded from GTEX web page
+```
+
+Then, I will create the enviroment I will use to use. Since GTEx uses RSEM 1.3.3, I will use that same version to maximize comparability. I use `mamba` to create the enviroment and install the dependencies.
+
+```{bash}
+mamba create -n RSEM -y \
+  star=2.7.10a \
+  samtools \
+  gcc \
+  gxx \
+  make \
+  zlib \
+  perl
+```
+
+```{bash}
+wget https://github.com/deweylab/RSEM/archive/refs/tags/v1.3.3.tar.gz -O rsem-1.3.3.tar.gz
+tar -xzf rsem-1.3.3.tar.gz
+cd RSEM-1.3.3
+make # to compile RSEM
+```
+
+After compiling RSEM, I will add it to my `PATH` so I can use it from anywhere in the terminal. Since I don't have write permissions to modify the system-wide `PATH`, I will add it to my user-level `~/.bashrc` file.
+
+```{bash}
+echo 'export PATH=/storage/scratch01/groups/md/microproteins/BROWN_GTEx_TPM_STAR/Cohort_2/tools/RSEM-1.3.3:$PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Reactivate the environment to apply the changes to `PATH`, then check that RSEM is available and the correct version is being used.
+
+```{bash}
+rsem-calculate-expression --version # should say RSEM v1.3.1, authors forgot to update the number
+```
+```{}
+
+```
+
+Then, I will submit the jobs to the cluster. First, I will build the STAR index for RSEM:
+
+`sbatch run_rsem_star_all.sbatch`
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=rsem_star_ref
+#SBATCH --output=rsem_star_ref_%j.out
+#SBATCH --error=rsem_star_ref_%j.err
+#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+
+source ~/.bashrc
+mamba activate RSEM
+
+cd /storage/scratch01/groups/md/microproteins/BROWN_GTEx_TPM_STAR
+
+rsem-prepare-reference \
+  --gtf gencode.v39.annotation.gtf \
+  --star \
+  GRCh38.primary_assembly.genome.fa \
+  rsem_star_reference/gencode_v39
+```
+
+Then, I will run RSEM with STAR for all the samples:
+
+`run_rsem_star_all.sbatch`
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=rsem_star_all
+#SBATCH --output=rsem_star_all_%j.out
+#SBATCH --error=rsem_star_all_%j.err
+#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+
+source ~/.bashrc
+mamba activate RSEM
+
+cd /storage/scratch01/groups/md/microproteins/BROWN_GTEx_TPM_STAR/Cohort_2
+
+mkdir -p rsem_results
+
+REF_PREFIX="/storage/scratch01/groups/md/microproteins/BROWN_GTEx_TPM_STAR/Cohort_2/rsem_star_reference/gencode_v39"
+STAR_PATH=$(dirname "$(which STAR)")
+
+for fastq in ERR*.fastq.gz; do
+    sample=$(basename "$fastq" .fastq.gz)
+    echo "Quantifying sample: $sample"
+
+    rsem-calculate-expression \
+        --star \
+        --star-path "$STAR_PATH" \
+        --star-gzipped-read-file \
+        -p 8 \
+        "$fastq" \
+        "$REF_PREFIX" \
+        "rsem_results/${sample}"
+
+    echo "Done: $sample"
+    echo "-----------------------------------------"
+done
+```
+
+### Merging BATLAS RSEM TPM values with GTEx TPM values
+
+I ran the following R script to compute the average TPM across all samples for each gene. I run it on the cluster using `RScript`.
+`compute_average_tpm.R`
+```{r}
+library(dplyr)
+library(readr)
+library(purrr)
+
+# All gene-level result files
+gene_files <- list.files(pattern = "\\.genes\\.results$")
+
+# Read each file: gene_id + TPM, TPM column named by sample
+read_one <- function(f) {
+  sample <- sub("\\.genes\\.results$", "", f)
+  read_tsv(f, show_col_types = FALSE) %>%
+    select(gene_id, TPM) %>%
+    rename(!!sample := TPM)}
+
+gene_list <- lapply(gene_files, read_one)
+
+# Merge on gene_id
+merged_tpm <- reduce(gene_list, full_join, by = "gene_id")
+
+# Replace NAs with 0
+merged_tpm[is.na(merged_tpm)] <- 0
+
+# Row-wise mean TPM
+avg_tpm <- merged_tpm %>%
+  rowwise() %>%
+  mutate(mean_TPM = mean(c_across(-gene_id))) %>%
+  ungroup() %>%
+  select(gene_id, mean_TPM)
+
+# Save
+write_tsv(avg_tpm, "average_TPM_across_samples_cohort_2.tsv")
+```
+
+Then, use the GTEX downloaded data (`GTEx_Analysis_2022-06-06_v10_RNASeQCv2.4.2_gene_median_tpm.gct`) and the computed BAT TPM matrix to 
+
+```{r nTPM_matrix, eval=TRUE}
+data <- read_tsv("GTEx_Analysis_2022-06-06_v10_RNASeQCv2.4.2_gene_median_tpm.gct")
+data <- data %>%
+  mutate(Gene = sub("\\..*$", "", Gene))  # remove .version in ensembl id
+
+bat_tpm <- read_tsv("average_TPM_across_samples_cohort_2.tsv") # quantificatoin using RSEM, same process GTEx used
+bat_tpm <- bat_tpm %>%
+  mutate(Gene = sub("\\..*$", "", gene_id)) %>%  # remove .version in ensembl id
+  dplyr::select(Gene, "Adipose_Brown" = BAT_TPM)
+
+# annotate gene types
+mart <- useEnsembl("ensembl", dataset="hsapiens_gene_ensembl")
+
+gene_types <- getBM(
+  attributes = c("ensembl_gene_id", "gene_biotype"),
+  filters = "ensembl_gene_id",
+  values = unique(data$Gene),
+  mart = mart)
+
+data_pc <- data %>% # Subset so it only contains protein coding genes! I only want those
+  inner_join(gene_types, by = c("Gene"="ensembl_gene_id")) %>%
+  filter(gene_biotype == "protein_coding")
+
+merged_tpm <- data_pc %>%
+  left_join(bat_tpm, by = "Gene", relationship = "many-to-many") # merge the GTEx TPM with the BAT TPM using the gene id as key. This is a many-to-many relationship because some genes have multiple transcripts, and thus multiple rows in the GTEx data, but only one row in the BAT TPM data (since RSEM quantifies at the gene level by summing across transcripts)
+
+merged_tpm$Adipose_Brown <- as.numeric(merged_tpm$Adipose_Brown) # this gives us a "raw" TPM matrix
+
+# GTEx does not provide nTPMs, but HPA does a two step normalization using the following approach:
+# They do between-sample normalization using TMM (edgeR-style) across all samples within a dataset.
+
+# Build and unnormalized TPM matrix
+tissue_cols <- setdiff(colnames(merged_tpm), c("Gene", "Gene.name"))
+
+tpm_mat <- merged_tpm %>%
+  dplyr::select(-gene_biotype, -Gene, -Gene.name) %>%  # remove gene_biotype + keep only tissues
+  mutate(across(everything(), as.numeric)) %>%  # make columns numeric
+  as.matrix() # turn into a matrix
+
+rownames(tpm_mat) <- merged_tpm$Gene.name # or Gene
+
+# Total TPM per tissue (column)
+col_sums <- colSums(tpm_mat)
+
+# pTPM = TPM / total_TPM_for_that_tissue * 1e6
+pTPM <- sweep(tpm_mat, 2, col_sums, FUN = "/") * 1e6
+
+library(edgeR) # edger for TMM normalization
+
+# Treat pTPM as pseudo-counts in a DGEList
+dge <- DGEList(counts = pTPM)
+
+# Compute TMM normalization factors
+dge <- calcNormFactors(dge, method = "TMM")
+
+# Effective library sizes after TMM (edgeR always uses original lib.size * norm.factor)
+eff_libsizes <- colSums(pTPM) * dge$samples$norm.factors
+
+# nTPM = TMM-normalized pTPM, scaled back to per-million
+nTPM_mat <- t( t(pTPM) / eff_libsizes ) * 1e6
+
+nTPM_df <- nTPM_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene") %>%
+  left_join(merged_tpm %>% dplyr::select(Gene), by = "Gene")
+
+# Optional: reorder columns for convenience
+nTPM_df <- nTPM_df %>%
+  relocate(Gene)
+
+write_csv(nTPM_df, "nTPM_df.csv")
+```
+
+### UMAP of the merged dataset
+
+```{r UMAP, eval=TRUE}
+# ============================================================
+# UMAP background transcript abundance
+# Uses correlation distance, no log, YES z-scoring
+# ============================================================
+
+library(uwot)
+library(RColorBrewer)
+
+nTPM_df <- read_csv("nTPM_df.csv")
+
+# Build matrix (genes x tissues)
+stopifnot(ncol(nTPM_df) >= 3)
+stopifnot(colnames(nTPM_df)[1] %in% c("Symbol", "gene", "Gene", "Gene.name"))
+
+nTPM_df <- nTPM_df %>%
+  rename(Symbol = 1)
+
+tissue_cols <- setdiff(colnames(nTPM_df), "Symbol")
+
+expr_mat <- nTPM_df %>%
+  dplyr::select(all_of(tissue_cols)) %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+
+expr_mat_z <- t(scale(t(expr_mat))) # row-wise z-score
+
+rownames(expr_mat_z) <- nTPM_df$Symbol
+
+# Assign dominant tissue only if top >= 4x second in TPMs!
+# BUT for building the signature matrix, we use expr_mat_z
+
+ENRICHMENT_THRESHOLD <- 1
+
+max1 <- apply(expr_mat, 1, max, na.rm = TRUE) # get the max value of each row
+dominant_tissue <- tissue_cols[max.col(expr_mat, ties.method = "first")] # get the colname for each max value
+
+second_max <- apply(expr_mat, 1, function(x) {
+  x <- x[is.finite(x)]
+  x_sorted <- sort(x, decreasing = TRUE) # sort them decreasing
+  x_sorted[2]}) # get the second one
+
+is_signature <- is.finite(max1) & (max1 > 0) & is.finite(second_max) &
+  ((second_max == 0 & max1 > 0) | (max1 >= ENRICHMENT_THRESHOLD * second_max))
+
+# Here we use the z-scored matrix
+sig_genes <- rownames(expr_mat_z)[is_signature]
+sig_mat   <- expr_mat_z[sig_genes, , drop = FALSE] # use the z-score matrix
+
+message("Signature genes used for background UMAP: ", length(sig_genes))
+
+# Fit UMAP on signature genes; keep model for transform. We will use seed = 3.
+bg_umap <- uwot::umap(
+  sig_mat,
+  n_neighbors = 20, # 20 is a common default, but can be tuned based on the dataset size and expected local structure
+  min_dist    = 0.1, # 0.1 is a common default, but can be tuned to control how tightly UMAP packs points together
+  repulsion_strength = 1, # 
+  metric      = "correlation", # pearson correlation distance. This is for better visualization
+  n_components = 2,
+  ret_model = TRUE,
+  verbose = TRUE,
+  seed = 1999)
+
+# uwot::save_uwot(bg_umap, "bg_umap_model_5")
+bg_umap <- uwot::load_uwot("bg_umap_model_5")
+
+# With ret_model=TRUE, bg_umap is a LIST; coords are in $embedding
+stopifnot(is.list(bg_umap), !is.null(bg_umap$embedding))
+
+bg_emb <- as.matrix(bg_umap$embedding)
+stopifnot(ncol(bg_emb) == 2)
+
+bg_df <- tibble(
+  Symbol = sig_genes,
+  Dominant.tissue = dominant_tissue[match(sig_genes, rownames(expr_mat_z))],
+  UMAP1 = bg_emb[, 1],
+  UMAP2 = bg_emb[, 2])
+
+
+# Tissue grouping based on GTEx sample annotations and manual curation. This is used for coloring the UMAP plot and for building the signature matrix later on. 
+# The grouping is somewhat subjective, but it is based on known biological relationships between tissues and their expected expression profiles.
+cns_labels <- c(
+  "Brain_Amygdala",
+  "Brain_Anterior_cingulate_cortex_BA24",
+  "Brain_Caudate_basal_ganglia",
+  "Brain_Cerebellar_Hemisphere",
+  "Brain_Cerebellum",
+  "Brain_Cortex",
+  "Brain_Frontal_Cortex_BA9",
+  "Brain_Hippocampus",
+  "Brain_Hypothalamus",
+  "Brain_Nucleus_accumbens_basal_ganglia",
+  "Brain_Putamen_basal_ganglia",
+  "Brain_Spinal_cord_cervical_c-1",
+  "Brain_Substantia_nigra"
+)
+
+colon <- c(
+  "Colon_Sigmoid",
+  "Colon_Transverse",
+  "Colon_Transverse_Mixed_Cell",
+  "Colon_Transverse_Mucosa",
+  "Colon_Transverse_Muscularis"
+)
+
+liver <- c(
+  "Liver",
+  "Liver_Hepatocyte",
+  "Liver_Mixed_Cell",
+  "Liver_Portal_Tract"
+)
+
+esophagus <- c(
+  "Esophagus_Gastroesophageal_Junction",
+  "Esophagus_Mucosa",
+  "Esophagus_Muscularis"
+)
+
+heart <- c(
+  "Heart_Atrial_Appendage",
+  "Heart_Left_Ventricle"
+)
+
+kidney <- c(
+  "Kidney_Cortex",
+  "Kidney_Medulla"
+)
+
+stomach <- c(
+  "Stomach_Mixed_Cell",
+  "Stomach_Mucosa",
+  "Stomach_Muscularis"
+)
+
+female_sex_labels <- c(
+  "Cervix_Ectocervix",
+  "Cervix_Endocervix",
+  "Ovary",
+  "Vagina",
+  "Uterus",
+  "Fallopian_Tube"
+)
+
+male_sex_labels <- c(
+  "Testis",
+  "Prostate"
+)
+
+sex_labels <- c(
+  "Testis",
+  "Prostate",
+  "Cervix_Ectocervix",
+  "Cervix_Endocervix",
+  "Ovary",
+  "Vagina",
+  "Uterus",
+  "Fallopian_Tube"
+)
+
+small_intestine <- c(
+  "Small_Intestine_Terminal_Ileum",
+  "Small_Intestine_Terminal_Ileum_Lymphode_Aggregate",
+  "Small_Intestine_Terminal_Ileum_Mixed_Cell"
+)
+
+pancreas <- c(
+  "Pancreas",
+  "Pancreas_Acini",
+  "Pancreas_Islets",
+  "Pancreas_Mixed_Cell"
+)
+
+arteries <- c(
+  "Artery_Aorta",
+  "Artery_Tibial",
+  "Artery_Coronary"
+)
+skin <- c(
+  "Skin_Not_Sun_Exposed_Suprapubic",
+  "Skin_Sun_Exposed_Lower_leg"
+)
+
+fibroblasts  <- c("Cells_Cultured_fibroblasts")
+limphocytes  <- c("Cells_EBV-transformed_lymphocytes")
+tibial_nerve <- c("Nerve_Tibial")
+whole_blood  <- c("Whole_Blood")
+
+pool_tissue_group <- function(dominant) {
+  dplyr::case_when(
+    dominant %in% cns_labels ~ "CNS regions",
+    
+    dominant %in% female_sex_labels ~ "female sex organs",
+    dominant %in% male_sex_labels ~ "male sex organs",
+    # dominant %in% sex_labels ~ "sex organs",
+    
+    dominant %in% fibroblasts  ~ "fibroblasts",
+    dominant %in% limphocytes  ~ "limphocytes",
+    dominant %in% tibial_nerve ~ "tibial nerve",
+    dominant %in% whole_blood  ~ "whole blood",
+    
+    dominant %in% arteries ~ "arteries",
+    dominant %in% liver    ~ "liver",
+    dominant %in% kidney   ~ "kidney",
+    dominant %in% stomach  ~ "stomach",
+    dominant == "Stomach"  ~ "stomach",
+    dominant %in% esophagus ~ "esophagus",
+    dominant %in% colon     ~ "colon",
+    dominant %in% heart     ~ "heart muscle",
+    
+    dominant == "Adipose_Subcutaneous"     ~ "adipose tissue subcutaneous",
+    dominant == "Adipose_Visceral_Omentum" ~ "adipose tissue omentum",
+    dominant == "Adipose_Brown"            ~ "adipose tissue brown",
+    
+    dominant == "Lung" ~ "lung",
+    dominant == "Adrenal_Gland" ~ "adrenal gland",
+    dominant == "Muscle_Skeletal" ~ "skeletal muscle",
+    dominant %in% skin ~ "skin",
+    dominant == "Thyroid" ~ "thyroid gland",
+    dominant == "Minor_Salivary_Gland" ~ "salivary gland",
+    dominant == "Spleen" ~ "spleen",
+    dominant == "Bladder" ~ "bladder",
+    dominant %in% small_intestine ~ "small intestine",
+    dominant %in% pancreas ~ "pancreas",
+    dominant == "Pituitary" ~ "pituitary gland",
+    dominant == "Breast_Mammary_Tissue" ~ "breast mammary tissue",
+    
+    TRUE ~ dominant
+  )
+}
+
+bg_df <- bg_df %>% mutate(Tissue_group = pool_tissue_group(Dominant.tissue))
+
+# Colors (same palette logic as the script)
+tissue_colors <- c(
+  "breast mammary tissue" = "#ff69b4",
+  "fibroblasts"      = "#708bf5",
+  "limphocytes"      = "#eeb5e4",
+  "arteries"         = "#f58d89",
+  "liver"            = "#ff0505",
+  "kidney"           = "#ed2128",
+  "CNS regions"      = "#dfb7f1",
+  "female sex organs" = "#bffaff",
+  "male sex organs" = "#8ffabb",
+  "sex organs"       = "#037a32",
+  "stomach"          = "#6BAED6",
+  "esophagus"        = "#edf02d",
+  "retina"           = "#367846",
+  "colon"            = "#fc51db",
+  "adrenal gland"    = "#8bc4af",
+  "skeletal muscle"  = "#6e6785",
+  "spinal cord"      = "#9E9AC8",
+  "vWAT"             = "#fcbf68",
+  "scWAT"            = "#ebcaa0",
+  "BAT    "          = "#a67371",
+  "spleen"           = "#07a88b",
+  "lung"             = "#90CAF9",
+  "thyroid gland"    = "#F091F8",
+  "salivary gland"   = "#B39DDB",
+  "heart muscle"     = "#3b0cf7",
+  "pituitary gland"  = "#603bf5",
+  "pancreas"         = "#3f558c",
+  "skin"             = "#53c182",
+  "small intestine"  = "#6a74e6",
+  "arteries"         = "#f58d89",
+  "tibial nerve"     = "#34daf8",
+  "whole blood"      = "#f2555a",
+  "bladder"          = "#f4a261")
+
+all_groups   <- sort(unique(bg_df$Tissue_group))
+extra_groups <- setdiff(all_groups, names(tissue_colors))
+extra_cols <- setNames(
+  colorRampPalette(brewer.pal(8, "Dark2"))(max(1, length(extra_groups))),
+  extra_groups)
+
+tissue_colors_full <- c(tissue_colors, extra_cols)
+```
+
+```{r UMAP_plot, eval=TRUE, fig.width=10, fig.height=8}
+# Plot
+BG_ALPHA <- 0.05
+BG_SIZE  <- 5
+
+p <- ggplot() +
+  geom_point(
+    data = bg_df,
+    aes(x = UMAP1, y = UMAP2, color = Tissue_group),
+    alpha = BG_ALPHA, size = BG_SIZE,
+    show.legend = TRUE
+  ) +
+  scale_color_manual(values = tissue_colors_full, name = "Tissue group") +
+  theme_bw(base_family = "Arial", base_size = 14) +
+  theme(
+    plot.title   = element_text(size = 18),
+    axis.title   = element_text(size = 16),
+    axis.text    = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    legend.text  = element_text(size = 12)
+    # panel.grid = element_blank(),
+    # legend.position = "right"
+  ) +
+  labs(
+    title = "Background tissue-signature UMAP",
+    # subtitle = paste0(
+    #   "Signature rule: top >= ", ENRICHMENT_THRESHOLD, "x second; ",
+    #   "UMAP: n_neighbors=", N_NEIGHBORS,
+    #   ", min_dist=", MIN_DIST,
+    #   ", metric=", METRIC
+    # ),
+    x = "UMAP1", y = "UMAP2")
+
+print(p)
+
+message("Signature genes used for background UMAP: ", nrow(bg_df))
 ```
 
 ```{r, eval=TRUE}

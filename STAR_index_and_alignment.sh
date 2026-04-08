@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=star_hg38_v39
-#SBATCH --output=/athena/angsd/scratch/sdb4002/Final_project/STAR_RUN.out
-#SBATCH --error=/athena/angsd/scratch/sdb4002/Final_project/STAR_RUN.err
+#SBATCH --output=STAR_RUN.out
+#SBATCH --error=STAR_RUN.err
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
