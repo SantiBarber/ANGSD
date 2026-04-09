@@ -30,7 +30,9 @@ library(purrr)
 ```
 # Introduction
 
-This project aims to analyze the "BATLAS" dataset and quantify the genome expression profile of brown adipose tissue (BAT). The purpose of this quantification is to incorporate the BAT quantification data to the GTEx consortium dataset. GTEx is a large-scale project that has generated a comprehensive resource of gene expression and regulation across multiple human tissues. Despite the importance of BAT in human metabolism and energy homeostasis, GTEx does not include any samples from this tissue. By integrating the BAT data with GTEx, we can gain insights into the unique gene expression patterns of BAT and how they compare to other tissues in the human body. This integration will allow us to better understand the molecular mechanisms underlying BAT function and its potential role in metabolic diseases.
+This project aims to analyze the "BATLAS" dataset and quantify the genome expression profile of brown adipose tissue (BAT). The purpose of this quantification is to incorporate BAT transcript abundance levels to the GTEx consortium dataset. GTEx is a large-scale project that has generated a comprehensive resource of gene expression and regulation across multiple human tissues. Despite the importance of BAT in human metabolism and energy homeostasis, GTEx does not include any samples from this tissue. By integrating the BAT data with GTEx, we can gain insights into the unique gene expression patterns of BAT and how they compare to other tissues in the human body. This integration will allow us to better understand the molecular mechanisms underlying BAT function and its potential role in metabolic diseases.
+
+As part of the integration, I 
 
 #### Original Publication
 
@@ -64,7 +66,7 @@ Brown adipose tissue (BAT) and white adipose tissue (WAT) from human deep neck s
 
 The "experimental condition" would be Brown adipose tissue (BAT). I want to know if the BAT samples are indeed enriched in brown adipose tissue markers compared to the WAT samples, and if the differentially expressed genes betweem both tissues supports the hypothesis that these samples are indeed coming from BAT tissue.
 
->Hypothesis: BAT samples have been correctly collected from patients and show a gene expression profile consistent with that of what would be expected for brown adipose tissue, including the expression of brown adipocyte-specific genes.
+>Hypothesis: BAT samples have been correctly collected from patients and show a gene expression profile consistent with that of brown adipose tissue, including the expression of brown adipocyte-specific genes.
 
 #### What sequencing platform was used?
 
@@ -73,8 +75,6 @@ In the final step before RNA-Seq, eight individual libraries were normalized and
 #### Citations
 
 Orava, J., Nuutila, P., Lidell, M.E., Oikonen, V., Noponen, T., Viljanen, T., Scheinin, M., Taittonen, M., Niemi, T., Enerba ¨ ck, S., and Virtanen, K.A. (2011). Different metabolic responses of human brown adipose tissue to activation by cold and insulin. Cell Metab. 14, 272–279.
-
-# Results
 
 # Methods
 
@@ -531,14 +531,6 @@ dds_batlas <- DESeqDataSetFromMatrix(
   design = ~ condition)
 
 dds_batlas
-```
-
-```{r, eval=TRUE}
-head(counts(dds_batlas), n=2)
-```
-
-```{r, eval=TRUE}
-as.data.frame(colData(dds_batlas))
 ```
 
 It is good practice to inspect the library sizes and remove genes with zero counts across all samples before normalization.
@@ -1288,7 +1280,7 @@ p <- ggplot() +
     aes(x = UMAP1, y = UMAP2, color = Tissue_group),
     alpha = BG_ALPHA, size = BG_SIZE,
     show.legend = TRUE
-  ) +
+) +
   scale_color_manual(values = tissue_colors_full, name = "Tissue group") +
   guides(color = guide_legend(override.aes = list(alpha = 1))) +
   theme_bw(base_family = "Arial", base_size = 14) +
@@ -1300,7 +1292,7 @@ p <- ggplot() +
     legend.text  = element_text(size = 12)
     # panel.grid = element_blank(),
     # legend.position = "right"
-  ) +
+) +
   labs(
     title = "Background tissue-signature UMAP",
     # subtitle = paste0(
@@ -1316,5 +1308,16 @@ print(p)
 ```{r, eval=TRUE}
 sessionInfo()
 ```
+
+# Results
+
+BAT samples show more mitocondrial genes on average, which is expected given the high mitochondrial content of brown adipose tissue. PCA analysis reveals that most BAT samples cluster together and are distinct from WAT samples, except for one BAT sample (`E387_7_brown_fat`) that clusters with WAT. This suggests that `E387_7_brown_fat` may be misannotated or contaminated with WAT, and it was excluded from further analysis.
+
+BAT samples show a clear enrichment for known brown adipose tissue markers such as *`UCP1`*, *`CIDEA`*, and *`PPARGC1A`* compared to WAT, which validates the BATLAS dataset as a useful resource for studying brown vs white adipose tissue transcriptomics in humans.
+
+GSEA analysis using a custom brown fat signature derived from BATLAS/ProFAT markers confirms that the BAT samples are significantly enriched for brown adipose tissue markers compared to WAT, further supporting the biological relevance of the differential expression results.
+
+When the BAT samples are merged with GTEx data and visualized using UMAP based on a background of tissue-specific signature genes, the BAT samples cluster separately from most other tissues, including WAT, and show some proximity to other metabolically active tissues such as skeletal muscle and liver. This suggests that the transcriptomic profile of BAT is distinct from WAT and shares some similarities with other metabolically active tissues.
+
 
 # Discussion 
